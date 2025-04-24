@@ -4,7 +4,8 @@ import os
 import requests
 from pathlib import Path
 import json
-
+from autodict import AutoDict
+from packaging.version import Version
 
 HOST = "localhost"  # Use "0.0.0.0" to make it accessible from other devices
 PORT = 8000
@@ -20,14 +21,23 @@ def download_file(url, save_path):
         with open(save_path, "wb") as file:
             for chunk in response.iter_content(chunk_size=8192):
                 file.write(chunk)
-        print(f"    Downloaded: {save_path}")
+        print(f"Downloaded: {save_path.replace(os.sep, '/')}")
     except requests.exceptions.RequestException as e:
-        print(f"    Failed to download {url}: {e}")
+        print(f"Failed to download {url}: {e}")
+
+def prepare_folder(folder_path):
+    os.makedirs(folder_path, exist_ok=True)
+    for filename in os.listdir(folder_path):
+        file_path = os.path.join(folder_path, filename)
+        if os.path.isfile(file_path): 
+            os.remove(file_path)
 
 def update_plugins():
-    plugin_set = {}
+    plugins = AutoDict()
     with open("follow.txt", "r") as file:
         for line in file:
+            if line[0] == "#":
+                continue
             url = line.strip()
             print("Reading {}".format(url))
             response = requests.get(url)
@@ -35,24 +45,33 @@ def update_plugins():
             plugin_list = response.json()
             for plugin in plugin_list:
                 name = plugin["Name"]
-                if name not in plugin_set:
-                    plugin_set[name] = plugin
-                    download_link = plugin["DownloadLinkInstall"]
-                    version = plugin["AssemblyVersion"]
-                    local_file_name = f"{version}.zip"
-                    local_path = os.path.join(CACHE_FOLDER, name, local_file_name)
-                    if not os.path.exists(local_path):
-                        print(f"    Downloading {name} {version} from {download_link}")
-                        folder_path = os.path.join(CACHE_FOLDER, name)
-                        os.makedirs(folder_path, exist_ok=True)
-                        download_file(download_link, local_path)
-                    local_url = f"http://{HOST}:{PORT}/{name}/{local_file_name}"
-                    plugin["DownloadLinkInstall"] = local_url
-                    plugin["DownloadLinkUpdate"] = local_url
+                api_level = int(plugin["DalamudApiLevel"])
+                version = plugin["AssemblyVersion"]
+                if not plugins[name][api_level][version]:
+                    plugins[name][api_level][version] = plugin
+    
+    plugins_to_use = []
+    for name, apis in plugins.items():
+        for api_level, versions in apis.items():
+            lastest_version = sorted(versions.keys(), key=Version)[-1]
+            plugin = versions[lastest_version]
+            download_link = plugin["DownloadLinkInstall"]
+            local_file_name = f"{lastest_version}.zip"
+            folder_name = f"{name}/API{api_level}"
+            local_path = os.path.join(CACHE_FOLDER, folder_name, local_file_name)
+            if not os.path.exists(local_path):
+                print(f"Downloading {name} {lastest_version} from {download_link}")
+                folder_path = os.path.join(CACHE_FOLDER, folder_name)
+                prepare_folder(folder_path)
+                download_file(download_link, local_path)
+            local_url = f"http://{HOST}:{PORT}/{folder_name}/{local_file_name}"
+            plugin["DownloadLinkInstall"] = local_url
+            plugin["DownloadLinkUpdate"] = local_url
+            plugins_to_use.append(plugin)
                     
-        with open("plugins/pluginmaster.json", "w") as file:
-            json.dump(list(plugin_set.values()), file,indent=4)
-        print()
+    with open("plugins/pluginmaster.json", "w") as file:
+        json.dump(plugins_to_use, file,indent=4)
+    print()
 
 class CustomHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
